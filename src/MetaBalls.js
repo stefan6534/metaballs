@@ -1,64 +1,11 @@
-import { useEffect, useRef } from "react";
-import {
-  Renderer,
-  Program,
-  Mesh,
-  Triangle,
-  Transform,
-  Vec3,
-  Camera,
-} from "ogl";
-
-import "./MetaBalls.css";
-
-function parseHexColor(hex) {
-  const c = hex.replace("#", "");
-  const r = parseInt(c.substring(0, 2), 16) / 255;
-  const g = parseInt(c.substring(2, 4), 16) / 255;
-  const b = parseInt(c.substring(4, 6), 16) / 255;
-  return [r, g, b];
-}
-
-function fract(x) {
-  return x - Math.floor(x);
-}
-
-function hash31(p) {
-  let r = [p * 0.1031, p * 0.1030, p * 0.0973].map(fract);
-  const r_yzx = [r[1], r[2], r[0]];
-  const dotVal = r[0] * (r_yzx[0] + 33.33) +
-    r[1] * (r_yzx[1] + 33.33) +
-    r[2] * (r_yzx[2] + 33.33);
-  for (let i = 0; i < 3; i++) {
-    r[i] = fract(r[i] + dotVal);
-  }
-  return r;
-}
-
-function hash33(v) {
-  let p = [v[0] * 0.1031, v[1] * 0.1030, v[2] * 0.0973].map(fract);
-  const p_yxz = [p[1], p[0], p[2]];
-  const dotVal = p[0] * (p_yxz[0] + 33.33) +
-    p[1] * (p_yxz[1] + 33.33) +
-    p[2] * (p_yxz[2] + 33.33);
-  for (let i = 0; i < 3; i++) {
-    p[i] = fract(p[i] + dotVal);
-  }
-  const p_xxy = [p[0], p[0], p[1]];
-  const p_yxx = [p[1], p[0], p[0]];
-  const p_zyx = [p[2], p[1], p[0]];
-  const result = [];
-  for (let i = 0; i < 3; i++) {
-    result[i] = fract((p_xxy[i] + p_yxx[i]) * p_zyx[i]);
-  }
-  return result;
-}
+// MetaBalls.js
+import React, { useEffect, useRef } from 'react';
+import './MetaBalls.css';
 
 const vertex = `#version 300 es
-precision highp float;
-layout(location = 0) in vec2 position;
+in vec4 a_position;
 void main() {
-  gl_Position = vec4(position, 0.0, 1.0);
+  gl_Position = a_position;
 }
 `;
 
@@ -76,215 +23,189 @@ uniform vec3 iMetaBalls[50];
 uniform float iClumpFactor;
 uniform bool enableTransparency;
 out vec4 outColor;
-const float PI = 3.14159265359;
+
 float getMetaBallValue(vec2 c, float r, vec2 p) {
   vec2 d = p - c;
   float dist2 = dot(d, d);
   return (r * r) / dist2;
 }
+
 void main() {
   vec2 fc = gl_FragCoord.xy;
   float scale = iAnimationSize / iResolution.y;
   vec2 coord = (fc - iResolution.xy * 0.5) * scale;
   vec2 mouseW = (iMouse.xy - iResolution.xy * 0.5) * scale;
+
   float m1 = 0.0;
   for (int i = 0; i < 50; i++) {
     if (i >= iBallCount) break;
     m1 += getMetaBallValue(iMetaBalls[i].xy, iMetaBalls[i].z, coord);
   }
+
   float m2 = getMetaBallValue(mouseW, iCursorBallSize, coord);
   float total = m1 + m2;
-  float f = smoothstep(-1.0, 1.0, (total - 1.3) / min(1.0, fwidth(total)));
-  vec3 cFinal = vec3(0.0);
-  if (total > 0.0) {
-    float alpha1 = m1 / total;
-    float alpha2 = m2 / total;
-    cFinal = iColor * alpha1 + iCursorColor * alpha2;
-  }
-  outColor = vec4(cFinal * f, enableTransparency ? f : 1.0);
+
+  float softness = 2.0;
+  float smoothed = smoothstep(1.0 - softness * 0.1, 1.0 + softness * 0.1, total);
+
+  vec3 cFinal = mix(iColor, iCursorColor, m2 / max(total, 0.0001));
+  vec3 blurred = cFinal * smoothed;
+
+  float alpha = enableTransparency ? smoothed : 1.0;
+  outColor = vec4(blurred, alpha);
 }
 `;
 
 const MetaBalls = ({
-  color = "#f4941d",
-  speed = 0.3,
-  enableMouseInteraction = true,
-  hoverSmoothness = 0.15,
+  color = '#ffffff',
+  cursorBallColor = '#ffffff',
+  cursorBallSize = 2,
+  ballCount = 15,
   animationSize = 30,
-  ballCount = 30,
+  enableMouseInteraction = true,
+  enableTransparency = true,
+  hoverSmoothness = 0.05,
   clumpFactor = 1,
-  cursorBallSize = 1,
-  cursorBallColor = "#f4941d",
-  enableTransparency = false,
+  speed = 0.3,
 }) => {
-  const containerRef = useRef(null);
+  const canvasRef = useRef(null);
+  const mouse = useRef({ x: 0, y: 0 });
+  const metaBalls = useRef([]);
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
+    const canvas = canvasRef.current;
+    const gl = canvas.getContext('webgl2');
+    if (!gl) return;
 
-    let animationFrameId;
-    let cleanupFn;
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
 
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) {
-        if (cleanupFn) cleanupFn(); // clear if re-entered
-        startAnimation();
-      } else {
-        if (animationFrameId) {
-          cancelAnimationFrame(animationFrameId);
-          animationFrameId = null;
-        }
-      }
-    }, { threshold: 0.1 });
+    const compile = (type, source) => {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      return shader;
+    };
 
-    observer.observe(container);
+    const program = gl.createProgram();
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment));
+    gl.linkProgram(program);
+    gl.useProgram(program);
 
-    function startAnimation() {
-      const dpr = 1;
-      const renderer = new Renderer({ dpr, alpha: true, premultipliedAlpha: false });
-      const gl = renderer.gl;
-      gl.clearColor(0, 0, 0, enableTransparency ? 0 : 1);
-      container.appendChild(gl.canvas);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
+      gl.STATIC_DRAW
+    );
 
-      const camera = new Camera(gl, { left: -1, right: 1, top: 1, bottom: -1, near: 0.1, far: 10 });
-      camera.position.z = 1;
+    const positionLocation = gl.getAttribLocation(program, 'a_position');
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
 
-      const geometry = new Triangle(gl);
-      const [r1, g1, b1] = parseHexColor(color);
-      const [r2, g2, b2] = parseHexColor(cursorBallColor);
+    const iResolution = gl.getUniformLocation(program, 'iResolution');
+    const iTime = gl.getUniformLocation(program, 'iTime');
+    const iMouse = gl.getUniformLocation(program, 'iMouse');
+    const iColor = gl.getUniformLocation(program, 'iColor');
+    const iCursorColor = gl.getUniformLocation(program, 'iCursorColor');
+    const iAnimationSize = gl.getUniformLocation(program, 'iAnimationSize');
+    const iBallCount = gl.getUniformLocation(program, 'iBallCount');
+    const iCursorBallSize = gl.getUniformLocation(program, 'iCursorBallSize');
+    const iMetaBalls = gl.getUniformLocation(program, 'iMetaBalls');
+    const iClumpFactor = gl.getUniformLocation(program, 'iClumpFactor');
+    const iEnableTransparency = gl.getUniformLocation(program, 'enableTransparency');
 
-      const metaBallsUniform = [];
-      for (let i = 0; i < 50; i++) {
-        metaBallsUniform.push(new Vec3(0, 0, 0));
-      }
+    const parseColor = (hex) => {
+      const bigint = parseInt(hex.slice(1), 16);
+      return [
+        ((bigint >> 16) & 255) / 255,
+        ((bigint >> 8) & 255) / 255,
+        (bigint & 255) / 255,
+      ];
+    };
 
-      const program = new Program(gl, {
-        vertex,
-        fragment,
-        uniforms: {
-          iTime: { value: 0 },
-          iResolution: { value: new Vec3(0, 0, 0) },
-          iMouse: { value: new Vec3(0, 0, 0) },
-          iColor: { value: new Vec3(r1, g1, b1) },
-          iCursorColor: { value: new Vec3(r2, g2, b2) },
-          iAnimationSize: { value: animationSize },
-          iBallCount: { value: ballCount },
-          iCursorBallSize: { value: cursorBallSize },
-          iMetaBalls: { value: metaBallsUniform },
-          iClumpFactor: { value: clumpFactor },
-          enableTransparency: { value: enableTransparency },
-        },
+    const cColor = parseColor(color);
+    const cCursorColor = parseColor(cursorBallColor);
+
+    for (let i = 0; i < ballCount; i++) {
+      metaBalls.current.push({
+        x: (Math.random() - 0.5) * canvas.width,
+        y: (Math.random() - 0.5) * canvas.height,
+        r: Math.random() * 1.5 + 1.5,
+        vx: (Math.random() - 0.5) * speed * 50,
+        vy: (Math.random() - 0.5) * speed * 50,
+      });
+    }
+
+    const loop = (time) => {
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.uniform3f(iResolution, canvas.width, canvas.height, 1);
+      gl.uniform1f(iTime, time * 0.001);
+      gl.uniform3f(iMouse, mouse.current.x, mouse.current.y, 0);
+      gl.uniform3f(iColor, ...cColor);
+      gl.uniform3f(iCursorColor, ...cCursorColor);
+      gl.uniform1f(iAnimationSize, animationSize);
+      gl.uniform1i(iBallCount, ballCount);
+      gl.uniform1f(iCursorBallSize, cursorBallSize);
+      gl.uniform1f(iClumpFactor, clumpFactor);
+      gl.uniform1i(iEnableTransparency, enableTransparency ? 1 : 0);
+
+      metaBalls.current.forEach((ball) => {
+        ball.x += ball.vx * 0.016;
+        ball.y += ball.vy * 0.016;
+
+        if (ball.x < -canvas.width / 2 || ball.x > canvas.width / 2) ball.vx *= -1;
+        if (ball.y < -canvas.height / 2 || ball.y > canvas.height / 2) ball.vy *= -1;
       });
 
-      const mesh = new Mesh(gl, { geometry, program });
-      const scene = new Transform();
-      mesh.setParent(scene);
+      const ballsData = new Float32Array(50 * 3);
+      metaBalls.current.forEach((ball, i) => {
+        ballsData[i * 3] = ball.x / (canvas.height / 2);
+        ballsData[i * 3 + 1] = ball.y / (canvas.height / 2);
+        ballsData[i * 3 + 2] = ball.r;
+      });
 
-      const maxBalls = 50;
-      const effectiveBallCount = Math.min(ballCount, maxBalls);
-      const ballParams = [];
-      for (let i = 0; i < effectiveBallCount; i++) {
-        const idx = i + 1;
-        const h1 = hash31(idx);
-        const st = h1[0] * (2 * Math.PI);
-        const dtFactor = 0.1 * Math.PI + h1[1] * (0.4 * Math.PI - 0.1 * Math.PI);
-        const baseScale = 5.0 + h1[1] * (10.0 - 5.0);
-        const h2 = hash33(h1);
-        const toggle = Math.floor(h2[0] * 2.0);
-        const radiusVal = 0.5 + h2[2] * (2.0 - 0.5);
-        ballParams.push({ st, dtFactor, baseScale, toggle, radius: radiusVal });
-      }
+      gl.uniform3fv(iMetaBalls, ballsData);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
 
-      const mouseBallPos = { x: 0, y: 0 };
-      let pointerInside = false;
-      let pointerX = 0;
-      let pointerY = 0;
+    const handleMouseMove = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      mouse.current.x = e.clientX - rect.left;
+      mouse.current.y = rect.height - (e.clientY - rect.top);
+    };
 
-      function resize() {
-        const width = container.clientWidth;
-        const height = container.clientHeight;
-        renderer.setSize(width * dpr, height * dpr);
-        gl.canvas.style.width = width + "px";
-        gl.canvas.style.height = height + "px";
-        program.uniforms.iResolution.value.set(gl.canvas.width, gl.canvas.height, 0);
-      }
-      window.addEventListener("resize", resize);
-      resize();
-
-      function onPointerMove(e) {
-        if (!enableMouseInteraction) return;
-        const rect = container.getBoundingClientRect();
-        pointerX = ((e.clientX - rect.left) / rect.width) * gl.canvas.width;
-        pointerY = (1 - (e.clientY - rect.top) / rect.height) * gl.canvas.height;
-      }
-      function onPointerEnter() { pointerInside = true; }
-      function onPointerLeave() { pointerInside = false; }
-
-      container.addEventListener("pointermove", onPointerMove);
-      container.addEventListener("pointerenter", onPointerEnter);
-      container.addEventListener("pointerleave", onPointerLeave);
-
-      const startTime = performance.now();
-      function update(t) {
-        animationFrameId = requestAnimationFrame(update);
-        const elapsed = (t - startTime) * 0.001;
-        program.uniforms.iTime.value = elapsed;
-
-        for (let i = 0; i < effectiveBallCount; i++) {
-          const p = ballParams[i];
-          const dt = elapsed * speed * p.dtFactor;
-          const th = p.st + dt;
-          const x = Math.cos(th);
-          const y = Math.sin(th + dt * p.toggle);
-          metaBallsUniform[i].set(x * p.baseScale * clumpFactor, y * p.baseScale * clumpFactor, p.radius);
-        }
-
-        let targetX = gl.canvas.width * 0.5;
-        let targetY = gl.canvas.height * 0.5;
-        if (pointerInside) {
-          targetX = pointerX;
-          targetY = pointerY;
-        }
-        mouseBallPos.x += (targetX - mouseBallPos.x) * hoverSmoothness;
-        mouseBallPos.y += (targetY - mouseBallPos.y) * hoverSmoothness;
-        program.uniforms.iMouse.value.set(mouseBallPos.x, mouseBallPos.y, 0);
-
-        renderer.render({ scene, camera });
-      }
-
-      animationFrameId = requestAnimationFrame(update);
-
-      cleanupFn = () => {
-        cancelAnimationFrame(animationFrameId);
-        window.removeEventListener("resize", resize);
-        container.removeEventListener("pointermove", onPointerMove);
-        container.removeEventListener("pointerenter", onPointerEnter);
-        container.removeEventListener("pointerleave", onPointerLeave);
-        container.removeChild(gl.canvas);
-        gl.getExtension("WEBGL_lose_context")?.loseContext();
-      };
+    if (enableMouseInteraction) {
+      window.addEventListener('mousemove', handleMouseMove);
     }
 
     return () => {
-      observer.disconnect();
-      if (animationFrameId) cancelAnimationFrame(animationFrameId);
-      if (cleanupFn) cleanupFn();
+      window.removeEventListener('mousemove', handleMouseMove);
     };
   }, [
     color,
     cursorBallColor,
-    speed,
-    enableMouseInteraction,
-    hoverSmoothness,
-    animationSize,
-    ballCount,
-    clumpFactor,
     cursorBallSize,
+    ballCount,
+    animationSize,
+    enableMouseInteraction,
     enableTransparency,
+    hoverSmoothness,
+    clumpFactor,
+    speed,
   ]);
 
-  return <div ref={containerRef} className="metaballs-container" />;
+  return <canvas ref={canvasRef} className="metaballs-container" />;
 };
 
 export default MetaBalls;

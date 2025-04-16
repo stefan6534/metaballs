@@ -1,9 +1,9 @@
-import React from "react";
-import MetaBalls from "./MetaBalls";
+import React from 'react';
+import MetaBalls from './MetaBalls';
 
 function App() {
   return (
-    <div className="App">
+    <div style={{ width: '100%', height: '100vh' }}>
       <MetaBalls
         color="#f4941d"
         cursorBallColor="#f4941d"
